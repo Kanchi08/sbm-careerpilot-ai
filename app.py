@@ -4,6 +4,7 @@ Reads and writes the CareerPilot Google Sheet. Only input columns are written;
 the sheet's formulas calculate everything else.
 """
 import hmac
+import html
 import re
 from datetime import datetime, timedelta, timezone
 
@@ -14,11 +15,48 @@ import streamlit as st
 st.set_page_config(page_title="SBM CareerPilot AI", layout="wide")
 
 
+STYLE = """
+<style>
+.block-container {max-width: 1100px; padding-top: 3.5rem;}
+.stApp {background: #F6F8FB;}
+[data-testid="stSidebar"] {background: #E8F3F1; border-right: 1px solid #D3E6E2;}
+.hero {background: linear-gradient(120deg, #0B3B5C 0%, #0F766E 100%); border-radius: 18px;
+  padding: 26px 30px; margin-bottom: 22px; box-shadow: 0 8px 24px rgba(15,60,90,.18);}
+.hero h1 {color: #FFFFFF; font-size: 1.9rem; margin: 0; padding: 0;}
+.hero p {color: #D5EFEB; margin: 6px 0 0 0;}
+[class*="st-key-card_"], [data-testid="stForm"],
+[data-testid="stMetric"] {background: #FFFFFF; border-radius: 14px;
+  box-shadow: 0 2px 10px rgba(15,40,70,.07);}
+[data-testid="stMetric"] {padding: 14px 18px; border-left: 4px solid #0F766E;}
+.card-title {font-size: 1.15rem; font-weight: 700; color: #0F172A; margin-bottom: 8px;}
+.chip {display: inline-block; padding: 3px 11px; margin: 0 6px 6px 0; border-radius: 999px;
+  font-size: .78rem; font-weight: 600; background: #EEF2F7; color: #334155;}
+.chip.open, .chip.top {background: #DCFCE7; color: #166534;}
+.chip.soon, .chip.good {background: #FEF3C7; color: #92400E;}
+.chip.closed {background: #E5E7EB; color: #4B5563;}
+.chip.live {background: #CCFBF1; color: #115E59;}
+.stButton button, .stFormSubmitButton button, .stLinkButton a {border-radius: 10px; font-weight: 600;}
+</style>
+"""
+
+
+def hero(title, subtitle):
+    st.markdown(
+        f'<div class="hero"><h1>{html.escape(title)}</h1><p>{html.escape(subtitle)}</p></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def chip(text, kind=""):
+    """A coloured label. Sheet text is escaped so it cannot inject HTML."""
+    return f'<span class="chip {kind}">{html.escape(str(text))}</span>' if text else ""
+
+
 def require_sign_in():
     """Access codes from the app's secrets decide the role: student or admin."""
     if st.session_state.get("role"):
         return st.session_state["role"]
-    st.title("SBM CareerPilot AI")
+    hero("SBM CareerPilot AI", "Every opportunity in one place, matched to you.")
     missing = [k for k in ("student_code", "admin_code", "sheet_id", "gcp_service_account") if k not in st.secrets]
     if missing:
         st.error(f"Missing in Secrets: {', '.join(missing)}")
@@ -151,10 +189,21 @@ def number(series):
 
 
 def opportunity_card(row, extra="", student=None, applied=False):
-    with st.container(border=True):
-        st.subheader(row.get("OpportunityName", ""))
-        facts = [row.get(c, "") for c in ("Company", "OpportunityType", "Domain", "Status")]
-        st.caption(" | ".join(f for f in facts if f))
+    with st.container(border=True, key="card_" + row.get("OpportunityID", "")):
+        status = row.get("Status", "")
+        tone = {"Open": "open", "Closing Soon": "soon", "Closed": "closed"}.get(status, "")
+        chips = chip(status, tone) + chip(row.get("OpportunityType")) + chip(row.get("Domain"))
+        if row.get("RelevanceScore"):
+            label = row.get("MatchLabel", "")
+            match_tone = {"Top Match": "top", "Good Match": "good"}.get(label, "")
+            chips = chip(f"{row['RelevanceScore']}/100 {label}", match_tone) + chips
+        if row.get("VerificationStatus") == "Auto-Published":
+            chips += chip("Live from inbox", "live")
+        st.markdown(
+            f'<div class="card-title">{html.escape(row.get("OpportunityName", ""))}</div>'
+            f'<div>{chip(row.get("Company"))}{chips}</div>',
+            unsafe_allow_html=True,
+        )
         if extra:
             st.write(extra)
         skills = [row.get(c, "") for c in ("RequiredSkill1", "RequiredSkill2")]
@@ -164,7 +213,7 @@ def opportunity_card(row, extra="", student=None, applied=False):
             f"Minimum CGPA: {row.get('MinCGPA') or 'Not stated'}"
         )
         if row.get("VerificationStatus") == "Auto-Published":
-            st.success(
+            st.caption(
                 f"Captured automatically from {row.get('SourceName') or 'the inbox'} "
                 f"(AI confidence {row.get('AIConfidence') or 'n/a'})"
             )
@@ -180,12 +229,12 @@ def opportunity_card(row, extra="", student=None, applied=False):
         if applied:
             st.caption("Applied. See My Applications.")
         elif student and row.get("Status") != "Closed":
-            if st.button("Mark as applied", key="apply" + row["OpportunityID"]):
+            if st.button("Mark as applied", key="apply" + row["OpportunityID"], type="primary"):
                 record_application(student, row["OpportunityID"])
 
 
 def feed_page(opps, student):
-    st.header("Opportunity Feed")
+    hero("Opportunity Feed", "Fresh internships, projects and competitions, ranked for you.")
     order = st.radio("Sort by", ["Newest", "Best match for me"], horizontal=True)
     c1, c2, c3 = st.columns(3)
     search = c1.text_input("Search name or company")
@@ -230,12 +279,12 @@ def feed_page(opps, student):
         r = row.to_dict()
         why = ""
         if r["RelevanceScore"]:
-            why = f"**{r['MatchLabel']} ({r['RelevanceScore']}/100)**: {r['MatchReason']}"
+            why = f"**Why this score:** {r['MatchReason']}"
         opportunity_card(r, extra=why, student=student, applied=r["OpportunityID"] in applied)
 
 
 def tracker_page(opps, student):
-    st.header("My Applications")
+    hero("My Applications", "Track every application from applied to selected.")
     apps = load("Applications", ("ApplicationID", "StudentID", "OpportunityID", "Status"))
     mine = apps[apps["StudentID"] == student]
 
@@ -271,7 +320,7 @@ def one_row(tab, student):
 
 
 def readiness_page(opps, student):
-    st.header("My Readiness")
+    hero("My Readiness", "Your scores, skill gaps and an AI coach.")
     ready = one_row("Career Readiness", student)
     resume = one_row("Resume Analysis", student)
     gap = one_row("Skill Gap Analysis", student)
@@ -481,7 +530,7 @@ def review_section():
 
 
 def admin_page(opps, student):
-    st.header("Admin: Review and Add")
+    hero("Admin: Review and Add", "Human checks on top of the automation.")
     queue, duplicates, add, sources = st.tabs(
         ["Review queue", "Duplicates blocked", "Add opportunity", "Source status"]
     )
@@ -504,7 +553,7 @@ def admin_page(opps, student):
 
 
 def impact_page(opps, student):
-    st.header("Impact Dashboard")
+    hero("Impact Dashboard", "What the automation is delivering.")
     st.subheader("Measured from the live pipeline")
     _, staging = fresh("Ingestion Staging")
     published = [r for r in staging if r["PublishedOpportunityID"]]
@@ -535,7 +584,9 @@ def impact_page(opps, student):
         st.write(f"Logged alert delivery: **{sent:.1%}** of {len(logs)} records (includes synthetic history).")
 
     st.subheader("Opportunities by source")
-    st.bar_chart(opps["SourceName"].replace("", "Unknown").value_counts())
+    st.bar_chart(
+        opps["SourceName"].replace("", "Unknown").value_counts(), horizontal=True, color="#0F766E"
+    )
 
     st.subheader("Efficiency model (estimates, not measurements)")
     c1, c2, c3 = st.columns(3)
@@ -552,8 +603,9 @@ def impact_page(opps, student):
 
 
 def main():
+    st.markdown(STYLE, unsafe_allow_html=True)
     role = require_sign_in()
-    st.sidebar.title("CareerPilot AI")
+    st.sidebar.markdown("## 🧭 CareerPilot AI")
     st.sidebar.caption(f"Signed in as {role}")
     pages = {
         "Opportunity Feed": feed_page,
