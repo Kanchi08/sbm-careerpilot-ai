@@ -233,8 +233,24 @@ def opportunity_card(row, extra="", student=None, applied=False):
                 record_application(student, row["OpportunityID"])
 
 
+@st.fragment(run_every="15s")
+def watch_for_new(known):
+    """Reload the feed by itself when an opportunity is added to the sheet."""
+    try:
+        ids = spreadsheet().worksheet("Opportunities").col_values(1)[1:]
+    except gspread.exceptions.APIError:
+        return  # temporary Google limit: try again on the next tick
+    new = {i for i in ids if i.strip()} - known
+    if new:
+        st.cache_data.clear()
+        st.session_state["flash"] = f"New opportunity just arrived: {', '.join(sorted(new))}"
+        st.rerun()
+    st.caption("🟢 Live: new opportunities appear automatically.")
+
+
 def feed_page(opps, student):
     hero("Opportunity Feed", "Fresh internships, projects and competitions, ranked for you.")
+    watch_for_new(set(opps["OpportunityID"]))
     order = st.radio("Sort by", ["Newest", "Best match for me"], horizontal=True)
     c1, c2, c3 = st.columns(3)
     search = c1.text_input("Search name or company")
@@ -389,16 +405,31 @@ def coach_section(student):
                 "Status": "Pending",
                 "CreatedAt": now().strftime("%Y-%m-%d %H:%M:%S"),
             })
-            done("Question sent. Click Refresh data in about a minute.")
+            done("Question sent. The answer will appear below.")
 
-    asked = load("Requests", ("RequestID", "StudentID", "Question", "Status", "Response"))
-    for _, row in asked[asked["StudentID"] == student].iloc[::-1].iterrows():
-        with st.container(border=True):
-            st.write(f"**{row['Question']}**")
-            if row["Status"] == "Done":
-                st.write(row["Response"])
-            else:
-                st.caption(f"Status: {row['Status']}")
+    waiting = any(
+        r["StudentID"] == student and r["Status"] in ("Pending", "Processing")
+        for r in fresh("Requests")[1]
+    )
+
+    def answers():
+        _, rows = fresh("Requests")
+        mine = [r for r in rows if r["StudentID"] == student]
+        still_waiting = any(r["Status"] in ("Pending", "Processing") for r in mine)
+        for row in reversed(mine):
+            with st.container(border=True, key="card_" + row["RequestID"]):
+                st.write(f"**{row['Question']}**")
+                if row["Status"] == "Done":
+                    st.write(row["Response"])
+                elif row["Status"] in ("Pending", "Processing"):
+                    st.info("The coach is thinking. The answer will appear here.", icon="⏳")
+                else:
+                    st.caption(f"Status: {row['Status']}")
+        if waiting and not still_waiting:
+            st.rerun()  # full rerun, which switches the timer off
+
+    # Check the sheet every 5 seconds, only while an answer is outstanding.
+    st.fragment(run_every="5s" if waiting else None)(answers)()
 
 
 def add_section(opps):
